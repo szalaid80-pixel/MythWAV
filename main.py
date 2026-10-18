@@ -146,7 +146,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Put your channel IDs here (e.g., [123456789, 987654321]):
+# Írd be ide a csatornák azonosítóit:
 CHANNEL_IDS = [1560657888412962946, 1560658025386086481, 1560657963931140196, 1560672683572592711] 
 
 @bot.event
@@ -160,7 +160,6 @@ async def on_ready():
 
 @bot.tree.command(name="audiosearch", description="Search in audio channels")
 async def audio_search(interaction: discord.Interaction, query: str):
-    # Public defer so everyone sees the searching status
     await interaction.response.defer(ephemeral=False)
 
     channels_to_search = CHANNEL_IDS if CHANNEL_IDS else [ch.id for ch in interaction.guild.text_channels]
@@ -173,15 +172,31 @@ async def audio_search(interaction: discord.Interaction, query: str):
     )
 
     if not hits:
-        await interaction.followup.send(f"No results found for: `{query}`", ephemeral=False)
+        embed = discord.Embed(
+            title="✦ Audio Search",
+            color=discord.Color.from_rgb(235, 87, 137)
+        )
+        embed.description = f"**QUERY** `{query}`\n**RESULTS** 0\n\nNo results found."
+        await interaction.followup.send(embed=embed, ephemeral=False)
         return
 
-    response_text = f"**Results for `{query}` ({len(hits)} items):**\n"
-    for hit in hits[:5]:
-        matches_str = ", ".join(hit.matches)
-        response_text += f"- **{hit.location}**: [{matches_str}]({hit.message.jump_url})\n"
+    hit = hits[0] # Első találat
+    matches_str = "\n".join(f"`{m}`" for m in hit.matches)
+    
+    embed = discord.Embed(
+        title="✦ Audio Search",
+        color=discord.Color.from_rgb(235, 87, 137) # Rózsaszín keret
+    )
+    embed.description = (
+        f"**QUERY** `{query}`\n"
+        f"**RESULTS** {len(hits)}\n\n"
+        f"✦ **01 · # | {hit.location}**\n\n"
+        f"📎 **File**\n{matches_str}\n\n"
+        f"[Open message ↗]({hit.message.jump_url})"
+    )
+    embed.set_footer(text=f"Page 1 of {len(hits)} · {len(hits)} result(s)")
 
-    await interaction.followup.send(response_text, ephemeral=False)
+    await interaction.followup.send(embed=embed, ephemeral=False)
 
 token = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN")
 if token:
