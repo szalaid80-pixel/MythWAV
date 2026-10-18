@@ -6,11 +6,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-# Logging beállítása
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("audiosearch")
 
-# --- 1. KERESÉSI SEGÉDFÜGGVÉNYEK ---
+# --- 1. SEARCH HELPER FUNCTIONS ---
 
 @dataclass(frozen=True)
 class SearchHit:
@@ -75,7 +75,7 @@ async def _collect_targets(guild: discord.Guild, channel_ids: Iterable[int]):
             try:
                 channel = await guild.fetch_channel(channel_id)
             except Exception as exc:
-                warnings.append(f"Nem érhető el a csatorna ({channel_id}): {exc}")
+                warnings.append(f"Channel not accessible ({channel_id}): {exc}")
                 continue
         if getattr(channel, "guild", None) is None or channel.guild.id != guild.id:
             continue
@@ -135,36 +135,34 @@ async def search_guild(
                         )
                     )
         except Exception as exc:
-            warnings.append(f"Hiba a keresés során ({_location(channel)}): {exc}")
+            warnings.append(f"Search error ({_location(channel)}): {exc}")
 
     hits.sort(key=lambda hit: hit.message.created_at, reverse=True)
     return hits, warnings
 
-# --- 2. DISCORD BOT INICIALIZÁLÁSA ÉS PARANCSOK ---
+# --- 2. DISCORD BOT INITIALIZATION AND COMMANDS ---
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Ide írd be azoknak a csatornáknak az ID-jét, amikben keresni szeretnél:
-# Példa: CHANNEL_IDS = [123456789012345678, 876543210987654321]
+# Put your channel IDs here (e.g., [123456789, 987654321]):
 CHANNEL_IDS = [1560657888412962946, 1560658025386086481, 1560657963931140196, 1560672683572592711] 
 
 @bot.event
 async def on_ready():
-    print(f"Bot bejelentkezve mint: {bot.user}")
+    print(f"Logged in as: {bot.user}")
     try:
         synced = await bot.tree.sync()
-        print(f"Szinkronizálva {len(synced)} parancs.")
+        print(f"Synced {len(synced)} commands.")
     except Exception as e:
-        print(f"Hiba a parancsok szinkronizálásakor: {e}")
+        print(f"Failed to sync commands: {e}")
 
-@bot.tree.command(name="audiosearch", description="Keresés az audio csatornákon")
+@bot.tree.command(name="audiosearch", description="Search in audio channels")
 async def audio_search(interaction: discord.Interaction, query: str):
-    # Válaszadási idő hosszabbítása (megakadályozza a 3 mp-es "did not respond" hibát)
-    await interaction.response.defer(ephemeral=True)
+    # Public defer so everyone sees the searching status
+    await interaction.response.defer(ephemeral=False)
 
-    # CSATORNA CHECK
     channels_to_search = CHANNEL_IDS if CHANNEL_IDS else [ch.id for ch in interaction.guild.text_channels]
 
     hits, warnings = await search_guild(
@@ -175,19 +173,18 @@ async def audio_search(interaction: discord.Interaction, query: str):
     )
 
     if not hits:
-        await interaction.followup.send(f"Nincs találat erre: `{query}`", ephemeral=True)
+        await interaction.followup.send(f"No results found for: `{query}`", ephemeral=False)
         return
 
-    response_text = f"**Találatok erre: `{query}` ({len(hits)} db):**\n"
-    for hit in hits[:5]:  # Az első 5 találat megjelenítése
+    response_text = f"**Results for `{query}` ({len(hits)} items):**\n"
+    for hit in hits[:5]:
         matches_str = ", ".join(hit.matches)
         response_text += f"- **{hit.location}**: [{matches_str}]({hit.message.jump_url})\n"
 
-    await interaction.followup.send(response_text, ephemeral=True)
+    await interaction.followup.send(response_text, ephemeral=False)
 
-# Bot indítása a környezeti változóból (Railway DISCORD_TOKEN / TOKEN)
 token = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN")
 if token:
     bot.run(token)
 else:
-    print("HIBA: Nem található a DISCORD_TOKEN környezeti változó!")
+    print("ERROR: DISCORD_TOKEN environment variable not found!")
