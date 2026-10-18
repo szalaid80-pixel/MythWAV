@@ -1,15 +1,16 @@
-"""Search helpers for configured Discord channels and their threads."""
-
-from __future__ import annotations
-
+import os
 import logging
 from dataclasses import dataclass
 from typing import Iterable
-
 import discord
+from discord import app_commands
+from discord.ext import commands
 
+# Logging beállítása
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("audiosearch")
 
+# --- 1. KERESÉSI SEGÉDFÜGGVÉNYEK ---
 
 @dataclass(frozen=True)
 class SearchHit:
@@ -17,9 +18,7 @@ class SearchHit:
     location: str
     matches: tuple[str, ...]
 
-
 def matching_items(message: discord.Message, query: str) -> tuple[str, ...]:
-    """Return only individual lines or filenames that contain every query term."""
     terms = [term.casefold() for term in query.split() if term]
     if not terms:
         return ()
@@ -44,17 +43,9 @@ def matching_items(message: discord.Message, query: str) -> tuple[str, ...]:
             seen.add(item)
     return tuple(matches)
 
-
-def matches_query(message: discord.Message, query: str) -> bool:
-    """Match when one line, embed line, or filename contains all query terms."""
-    return bool(matching_items(message, query))
-
-
 def has_search_permissions(channel: object, member: discord.Member) -> bool:
-    """Prevent returning content from a channel the command user cannot read."""
-    permissions = channel.permissions_for(member)  # type: ignore[attr-defined]
+    permissions = channel.permissions_for(member)
     return permissions.view_channel and permissions.read_message_history
-
 
 def _location(channel: discord.abc.GuildChannel | discord.Thread) -> str:
     parent = getattr(channel, "parent", None)
@@ -62,9 +53,7 @@ def _location(channel: discord.abc.GuildChannel | discord.Thread) -> str:
         return f"{parent.name} / {channel.name}"
     return getattr(channel, "name", str(channel.id))
 
-
 async def _add_archived_threads(parent: object, collected: dict[int, discord.Thread]) -> None:
-    """Load archived posts/threads where the parent channel supports it."""
     archived_threads = getattr(parent, "archived_threads", None)
     if archived_threads is None:
         return
@@ -72,34 +61,10 @@ async def _add_archived_threads(parent: object, collected: dict[int, discord.Thr
         iterator = archived_threads(limit=None)
         async for thread in iterator:
             collected[thread.id] = thread
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        log.info("Could not read archived threads for channel %s: %s", parent.id, exc)
-    except TypeError:
-        # Older discord.py versions may not accept limit=None.
-        try:
-            iterator = archived_threads()
-            async for thread in iterator:
-                collected[thread.id] = thread
-        except (discord.Forbidden, discord.HTTPException, TypeError) as exc:
-            log.info("Could not read archived threads for channel %s: %s", parent.id, exc)
+    except Exception as exc:
+        log.info("Archived threads log: %s", exc)
 
-    # Text channels can also contain private archived threads. Discord only
-    # returns those the bot is allowed to view (or manage).
-    if isinstance(parent, discord.TextChannel):
-        try:
-            async for thread in parent.archived_threads(
-                private=True, joined=False, limit=None
-            ):
-                collected[thread.id] = thread
-        except (discord.Forbidden, discord.HTTPException, TypeError) as exc:
-            log.info("Could not read private archived threads for channel %s: %s", parent.id, exc)
-
-
-async def _collect_targets(
-    guild: discord.Guild,
-    channel_ids: Iterable[int],
-) -> tuple[list[discord.abc.Messageable], list[str]]:
-    """Resolve configured parents and discover active/archived child threads."""
+async def _collect_targets(guild: discord.Guild, channel_ids: Iterable[int]):
     parents: list[object] = []
     targets: dict[int, discord.abc.Messageable] = {}
     warnings: list[str] = []
@@ -109,36 +74,31 @@ async def _collect_targets(
         if channel is None:
             try:
                 channel = await guild.fetch_channel(channel_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-                warnings.append(f"Could not access configured channel {channel_id}: {exc}")
+            except Exception as exc:
+                warnings.append(f"Nem érhető el a csatorna ({channel_id}): {exc}")
                 continue
         if getattr(channel, "guild", None) is None or channel.guild.id != guild.id:
-            warnings.append(f"Configured channel {channel_id} is not in this server.")
             continue
         if hasattr(channel, "history"):
             targets[channel.id] = channel
         parents.append(channel)
 
-    # Fetch active threads instead of relying only on the local cache.
     active_by_parent: dict[int, list[discord.Thread]] = {}
     try:
         for thread in await guild.active_threads():
             active_by_parent.setdefault(thread.parent_id, []).append(thread)
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        log.info("Could not fetch all active threads in guild %s: %s", guild.id, exc)
+    except Exception:
         for thread in guild.threads:
             active_by_parent.setdefault(thread.parent_id, []).append(thread)
 
     for parent in parents:
         for thread in active_by_parent.get(parent.id, []):
             targets[thread.id] = thread
-        # ForumChannel.threads and TextChannel.threads include cached active threads.
         for thread in getattr(parent, "threads", []):
             targets[thread.id] = thread
-        await _add_archived_threads(parent, targets)  # type: ignore[arg-type]
+        await _add_archived_threads(parent, targets)
 
     return list(targets.values()), warnings
-
 
 async def search_guild(
     guild: discord.Guild,
@@ -146,24 +106,19 @@ async def search_guild(
     query: str,
     requester: discord.Member,
     max_messages_per_channel: int | None = None,
-) -> tuple[list[SearchHit], list[str]]:
-    """Search selected channel history, active threads, and archived posts."""
+):
     targets, warnings = await _collect_targets(guild, channel_ids)
     hits: list[SearchHit] = []
     bot_member = guild.me
 
     for channel in targets:
         try:
-            # Search only sources the invoking member can already read. This
-            # avoids disclosing private channel or thread content in an
-            # ephemeral result to someone who lacks access.
             if not has_search_permissions(channel, requester):
                 continue
 
             if bot_member is not None:
                 permissions = channel.permissions_for(bot_member)
                 if not permissions.view_channel or not permissions.read_message_history:
-                    warnings.append(f"Missing View Channel / Read Message History in {_location(channel)}.")
                     continue
 
             async for message in channel.history(
@@ -179,11 +134,60 @@ async def search_guild(
                             matches=matched_items,
                         )
                     )
-        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
-            warnings.append(f"Could not search {_location(channel)}: {exc}")
-        except AttributeError:
-            # Some channel types are not messageable in the installed Discord API.
-            continue
+        except Exception as exc:
+            warnings.append(f"Hiba a keresés során ({_location(channel)}): {exc}")
 
     hits.sort(key=lambda hit: hit.message.created_at, reverse=True)
     return hits, warnings
+
+# --- 2. DISCORD BOT INICIALIZÁLÁSA ÉS PARANCSOK ---
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Ide írd be azoknak a csatornáknak az ID-jét, amikben keresni szeretnél:
+# Példa: CHANNEL_IDS = [123456789012345678, 876543210987654321]
+CHANNEL_IDS = [] 
+
+@bot.event
+async def on_ready():
+    print(f"Bot bejelentkezve mint: {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Szinkronizálva {len(synced)} parancs.")
+    except Exception as e:
+        print(f"Hiba a parancsok szinkronizálásakor: {e}")
+
+@bot.tree.command(name="audiosearch", description="Keresés az audio csatornákon")
+async def audio_search(interaction: discord.Interaction, query: str):
+    # Válaszadási idő hosszabbítása (megakadályozza a 3 mp-es "did not respond" hibát)
+    await interaction.response.defer(ephemeral=True)
+
+    # CSATORNA CHECK
+    channels_to_search = CHANNEL_IDS if CHANNEL_IDS else [ch.id for ch in interaction.guild.text_channels]
+
+    hits, warnings = await search_guild(
+        interaction.guild,
+        channels_to_search,
+        query,
+        interaction.user
+    )
+
+    if not hits:
+        await interaction.followup.send(f"Nincs találat erre: `{query}`", ephemeral=True)
+        return
+
+    response_text = f"**Találatok erre: `{query}` ({len(hits)} db):**\n"
+    for hit in hits[:5]:  # Az első 5 találat megjelenítése
+        matches_str = ", ".join(hit.matches)
+        response_text += f"- **{hit.location}**: [{matches_str}]({hit.message.jump_url})\n"
+
+    await interaction.followup.send(response_text, ephemeral=True)
+
+# Bot indítása a környezeti változóból (Railway DISCORD_TOKEN / TOKEN)
+token = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN")
+if token:
+    bot.run(token)
+else:
+    print("HIBA: Nem található a DISCORD_TOKEN környezeti változó!")
