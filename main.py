@@ -148,7 +148,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Ide írd be azoknak a csatornáknak az ID-jét, amikben keresni szeretnél:
 # Példa: CHANNEL_IDS = [123456789012345678, 876543210987654321]
-CHANNEL_IDS = [] 
+CHANNEL_IDS = [1560657888412962946, 1560658025386086481, 1560657963931140196, 1560672683572592711] 
 
 @bot.event
 async def on_ready():
